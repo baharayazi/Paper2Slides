@@ -3,11 +3,7 @@ import path from "node:path";
 
 import pptxgen from "pptxgenjs";
 
-const allowedImageExtensions = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-]);
+const allowedImageExtensions = new Set([".png", ".jpg", ".jpeg"]);
 
 const planPath = process.argv[2];
 const outputPath = process.argv[3];
@@ -18,186 +14,301 @@ if (!planPath || !outputPath) {
   );
 }
 
-const presentationPlan = JSON.parse(
-  fs.readFileSync(planPath, "utf8"),
-);
+const plan = JSON.parse(fs.readFileSync(planPath, "utf8"));
+const isRTL = plan.direction === "rtl";
+const lang = plan.language_tag || "en-US";
+const align = isRTL ? "right" : "left";
+
+const theme = {
+  background: "F8FAFC",
+  title: "0F172A",
+  accent: "1D4ED8",
+  body: "1F2937",
+  muted: "64748B",
+  caption: "475569",
+  panel: "FFFFFF",
+  font: isRTL ? "Tahoma" : "Calibri",
+};
+
+// LAYOUT_WIDE is 13.333 x 7.5 inches.
+const page = { w: 13.333, h: 7.5, margin: 0.6 };
 
 const pptx = new pptxgen();
-
 pptx.layout = "LAYOUT_WIDE";
 pptx.author = "Paper2Slides";
-pptx.subject = "Academic paper presentation";
-pptx.title = presentationPlan.presentation_title;
 pptx.company = "Paper2Slides";
-
-function getVerifiedImagePath(imagePath) {
-  if (!imagePath) {
-    return null;
-  }
-
-  const resolvedPath = path.resolve(
-    process.cwd(),
-    imagePath,
-  );
-
-  const extension = path.extname(resolvedPath).toLowerCase();
-
-  const isAllowed = allowedImageExtensions.has(extension);
-  const exists = fs.existsSync(resolvedPath);
-
-  if (!isAllowed || !exists) {
-    return null;
-  }
-
-  return resolvedPath;
+pptx.subject = "Academic paper presentation";
+pptx.title = plan.presentation_title || plan.source_title || "Presentation";
+if (isRTL) {
+  pptx.rtlMode = true;
 }
 
-function addSlide(slideData, slideNumber, totalSlides) {
-  const slide = pptx.addSlide();
+function text(value) {
+  if (value === null || value === undefined) return "";
+  const str = String(value).trim();
+  return str.toLowerCase() === "null" ? "" : str;
+}
 
-  slide.background = {
-    color: "F8FAFC",
+function verifiedImagePath(imagePath) {
+  const value = text(imagePath);
+  if (!value) return null;
+  const resolved = path.isAbsolute(value)
+    ? value
+    : path.resolve(path.dirname(planPath), value);
+  const extension = path.extname(resolved).toLowerCase();
+  if (!allowedImageExtensions.has(extension) || !fs.existsSync(resolved)) {
+    return null;
+  }
+  return resolved;
+}
+
+function baseTextOptions(extra) {
+  return {
+    fontFace: theme.font,
+    align,
+    rtlMode: isRTL,
+    lang,
+    margin: 0,
+    ...extra,
   };
+}
 
-  const verifiedImagePath = getVerifiedImagePath(
-    slideData.image_path,
-  );
-
-  const hasImage = verifiedImagePath !== null;
-
-  if (hasImage) {
-    console.log(
-      `Slide ${slideNumber}: using image ${verifiedImagePath}`,
-    );
-  } else {
-    console.log(
-      `Slide ${slideNumber}: no approved image selected.`,
-    );
-  }
-
-  const textWidth = hasImage ? 5.4 : 11.8;
-
-  slide.addText(
-    slideData.title,
-    {
-      x: 0.7,
-      y: 0.45,
-      w: 11.9,
-      h: 0.5,
-      fontFace: "Arial",
-      fontSize: 25,
-      bold: true,
-      color: "102A43",
-      align: "right",
-      margin: 0,
-      fit: "shrink",
-    },
-  );
-
-  slide.addText(
-    slideData.key_message,
-    {
-      x: 0.7,
-      y: 1.2,
-      w: textWidth,
-      h: 0.7,
-      fontFace: "Arial",
-      fontSize: 18,
-      bold: true,
-      color: "1D4ED8",
-      align: "right",
-      margin: 0,
-      fit: "shrink",
-    },
-  );
-
-  const bulletText = slideData.bullets
-    .map((bullet) => `• ${bullet}`)
-    .join("\n\n");
-
-  slide.addText(
-    bulletText,
-    {
-      x: 0.7,
-      y: 2.1,
-      w: textWidth,
-      h: 3.7,
-      fontFace: "Arial",
-      fontSize: 16,
-      color: "1F2937",
-      align: "right",
-      breakLine: false,
-      margin: 0.05,
-      valign: "top",
-      fit: "shrink",
-    },
-  );
-
-  if (hasImage) {
-    slide.addImage(
-      {
-        path: verifiedImagePath,
-        x: 6.6,
-        y: 1.6,
-        w: 5.9,
-        h: 3.8,
-      },
-    );
-
-    slide.addText(
-      slideData.image_explanation,
-      {
-        x: 6.6,
-        y: 5.65,
-        w: 5.9,
-        h: 0.7,
-        fontFace: "Arial",
-        fontSize: 12,
-        color: "475569",
-        align: "right",
-        margin: 0,
-        fit: "shrink",
-      },
-    );
-  }
-
+function addFooter(slide, slideNumber, totalSlides) {
   slide.addText(
     `${slideNumber} / ${totalSlides}`,
-    {
-      x: 11.55,
-      y: 6.9,
-      w: 0.7,
-      h: 0.2,
-      fontFace: "Arial",
-      fontSize: 9,
-      color: "64748B",
-      align: "right",
-      margin: 0,
-    },
+    baseTextOptions({
+      x: isRTL ? page.margin : page.w - page.margin - 1.0,
+      y: page.h - 0.45,
+      w: 1.0,
+      h: 0.25,
+      fontSize: 10,
+      color: theme.muted,
+      align: isRTL ? "left" : "right",
+    }),
+  );
+  slide.addText(
+    text(plan.source_title),
+    baseTextOptions({
+      x: isRTL ? page.margin + 1.2 : page.margin,
+      y: page.h - 0.45,
+      w: page.w - 2 * page.margin - 1.2,
+      h: 0.25,
+      fontSize: 10,
+      color: theme.muted,
+      fit: "shrink",
+    }),
   );
 }
 
-const slides = presentationPlan.slides;
+function addTitleSlide(totalSlides) {
+  const slide = pptx.addSlide();
+  slide.background = { color: theme.title };
 
-for (const [index, slideData] of slides.entries()) {
-  addSlide(
-    slideData,
-    index + 1,
-    slides.length,
+  slide.addText(
+    text(plan.presentation_title) || text(plan.source_title),
+    baseTextOptions({
+      x: page.margin + 0.4,
+      y: 1.9,
+      w: page.w - 2 * page.margin - 0.8,
+      h: 2.0,
+      fontSize: 38,
+      bold: true,
+      color: "FFFFFF",
+      valign: "bottom",
+      fit: "shrink",
+    }),
+  );
+  slide.addShape(pptx.ShapeType.rect, {
+    x: isRTL ? page.w - page.margin - 0.4 - 1.6 : page.margin + 0.4,
+    y: 4.05,
+    w: 1.6,
+    h: 0.08,
+    fill: { color: "60A5FA" },
+    line: { color: "60A5FA" },
+  });
+  slide.addText(
+    text(plan.source_title),
+    baseTextOptions({
+      x: page.margin + 0.4,
+      y: 4.3,
+      w: page.w - 2 * page.margin - 0.8,
+      h: 0.9,
+      fontSize: 18,
+      color: "CBD5E1",
+      valign: "top",
+      fit: "shrink",
+    }),
+  );
+  slide.addText(
+    `${totalSlides} slides · generated by Paper2Slides`,
+    baseTextOptions({
+      x: page.margin + 0.4,
+      y: page.h - 0.9,
+      w: page.w - 2 * page.margin - 0.8,
+      h: 0.3,
+      fontSize: 11,
+      color: "94A3B8",
+    }),
+  );
+  slide.addNotes(
+    [
+      `Source paper: ${text(plan.source_title)}`,
+      plan.source_file ? `File: ${plan.source_file}` : "",
+      plan.page_count ? `Pages: ${plan.page_count}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
   );
 }
 
-fs.mkdirSync(
-  path.dirname(outputPath),
-  {
-    recursive: true,
-  },
-);
+function addContentSlide(slideData, slideNumber, totalSlides) {
+  const slide = pptx.addSlide();
+  slide.background = { color: theme.background };
 
-await pptx.writeFile(
-  {
-    fileName: outputPath,
-  },
-);
+  const imagePath = verifiedImagePath(slideData.image_path);
+  const hasImage = imagePath !== null;
+  console.log(
+    hasImage
+      ? `Slide ${slideNumber}: using figure ${slideData.image_figure_id || ""} ${path.basename(imagePath)}`
+      : `Slide ${slideNumber}: no figure`,
+  );
 
+  const contentWidth = page.w - 2 * page.margin;
+  const gap = 0.4;
+  const textWidth = hasImage ? contentWidth * 0.46 : contentWidth;
+  const imageWidth = contentWidth - textWidth - gap;
+
+  // Text goes on the reading-start side: left for LTR, right for RTL.
+  const textX = hasImage && isRTL ? page.w - page.margin - textWidth : page.margin;
+  const imageX = isRTL ? page.margin : page.margin + textWidth + gap;
+
+  slide.addText(
+    text(slideData.title),
+    baseTextOptions({
+      x: page.margin,
+      y: 0.45,
+      w: contentWidth,
+      h: 0.75,
+      fontSize: 28,
+      bold: true,
+      color: theme.title,
+      valign: "middle",
+      fit: "shrink",
+    }),
+  );
+  slide.addShape(pptx.ShapeType.rect, {
+    x: isRTL ? page.w - page.margin - 1.2 : page.margin,
+    y: 1.25,
+    w: 1.2,
+    h: 0.06,
+    fill: { color: theme.accent },
+    line: { color: theme.accent },
+  });
+
+  slide.addText(
+    text(slideData.key_message),
+    baseTextOptions({
+      x: textX,
+      y: 1.5,
+      w: textWidth,
+      h: 0.9,
+      fontSize: 17,
+      bold: true,
+      color: theme.accent,
+      valign: "top",
+      fit: "shrink",
+    }),
+  );
+
+  const bullets = (slideData.bullets || []).map((bullet) => text(bullet)).filter(Boolean);
+  slide.addText(
+    bullets.map((bullet) => ({
+      text: bullet,
+      options: {
+        bullet: { indent: 18 },
+        breakLine: true,
+        paraSpaceAfter: 8,
+      },
+    })),
+    baseTextOptions({
+      x: textX,
+      y: 2.5,
+      w: textWidth,
+      h: page.h - 2.5 - 0.8,
+      fontSize: bullets.length > 3 ? 15 : 16,
+      color: theme.body,
+      valign: "top",
+      fit: "shrink",
+      margin: 2,
+    }),
+  );
+
+  if (hasImage) {
+    const imageTop = 1.5;
+    const captionHeight = 0.75;
+    const imageHeight = page.h - imageTop - 0.8 - captionHeight;
+
+    slide.addShape(pptx.ShapeType.rect, {
+      x: imageX,
+      y: imageTop,
+      w: imageWidth,
+      h: imageHeight + captionHeight,
+      fill: { color: theme.panel },
+      line: { color: "E2E8F0", width: 0.75 },
+      shadow: { type: "outer", blur: 4, offset: 1, angle: 90, color: "CBD5E1", opacity: 0.4 },
+    });
+    slide.addImage({
+      path: imagePath,
+      x: imageX + 0.15,
+      y: imageTop + 0.15,
+      w: imageWidth - 0.3,
+      h: imageHeight - 0.2,
+      sizing: { type: "contain", w: imageWidth - 0.3, h: imageHeight - 0.2 },
+    });
+    const figureLabel = slideData.image_page
+      ? `${slideData.image_figure_id ? slideData.image_figure_id.replace(/^F/, "Figure ") : "Figure"} · p. ${slideData.image_page}`
+      : "";
+    slide.addText(
+      [
+        {
+          text: text(slideData.image_explanation) || text(slideData.image_caption),
+          options: { breakLine: true },
+        },
+        ...(figureLabel
+          ? [{ text: figureLabel, options: { color: theme.muted, fontSize: 9 } }]
+          : []),
+      ],
+      baseTextOptions({
+        x: imageX + 0.15,
+        y: imageTop + imageHeight,
+        w: imageWidth - 0.3,
+        h: captionHeight - 0.05,
+        fontSize: 11,
+        color: theme.caption,
+        valign: "top",
+        fit: "shrink",
+      }),
+    );
+  }
+
+  const notes = [
+    text(slideData.speaker_notes),
+    hasImage && slideData.image_caption
+      ? `\nFigure (page ${slideData.image_page}): ${text(slideData.image_caption)}`
+      : "",
+    `\nSource: ${text(plan.source_title)}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  slide.addNotes(notes);
+
+  addFooter(slide, slideNumber, totalSlides);
+}
+
+const slides = plan.slides || [];
+addTitleSlide(slides.length);
+slides.forEach((slideData, index) => addContentSlide(slideData, index + 1, slides.length));
+
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+await pptx.writeFile({ fileName: outputPath });
 console.log(`Presentation created: ${outputPath}`);

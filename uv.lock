@@ -191,13 +191,14 @@ wheels = [
 
 [[package]]
 name = "paper2slides"
-version = "0.1.0"
-source = { virtual = "." }
+version = "0.2.0"
+source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "ollama" },
     { name = "pydantic" },
     { name = "pymupdf" },
+    { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -214,6 +215,7 @@ requires-dist = [
     { name = "ollama", specifier = ">=0.6.2" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pymupdf", specifier = ">=1.28.2" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.53.0" },
 ]

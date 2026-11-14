@@ -1,310 +1,94 @@
+"""Command-line interface for Paper2Slides."""
+
+from __future__ import annotations
+
 import argparse
-import json
-import re
-from dataclasses import dataclass
+import logging
+import sys
 from pathlib import Path
 
-import pymupdf
-
-from ai_client import summarize_article, plan_presentation, review_presentation_plan
-
-
-@dataclass
-class ExtractedImage:
-    page_num: int
-    path: Path
-    width: int
-    height: int
-    caption: str
+from .llm import LLM, LLMError
+from .orchestrator import MAX_SLIDES, MIN_SLIDES, run_pipeline
+from .render import RenderError
 
 
-@dataclass
-class Article:
-    source_path: Path
-    title: str
-    page_count: int
-    text: str
-    images: list[ExtractedImage]
-
-
-def read_pdf_text(pdf_path: Path) -> tuple[int, str]:
-    """Read text from all pages of a PDF file"""
-    with pymupdf.open(pdf_path) as doc:
-        pages = []
-
-        for page_num, page in enumerate(doc, start=1):
-            page_text = page.get_text("text").strip()
-            pages.append(
-                f"\n--- Page {page_num} ---\n"
-                f"{page_text}"
-            )
-
-        return doc.page_count, "\n".join(pages)
-
-
-def find_caption(page: pymupdf.Page, xref: int) -> str:
-    """Find a likely figure caption bellow an image"""
-    image_rectangles = page.get_image_rects(xref)
-    if not image_rectangles:
-        return "Caption not found"
-
-    image_bottom = image_rectangles[0].y1
-    text_blocks = page.get_text("blocks")
-
-    possible_captions = []
-    for block in text_blocks:
-        block_top = block[1]
-        block_text = block[4].strip()
-
-        is_below_image = block_top >= image_bottom
-        looks_like_caption = re.match(
-            r"^(Figure|Fig\.)\s*\d+",
-            block_text,
-            re.IGNORECASE,
-        )
-
-        if is_below_image and looks_like_caption:
-            possible_captions.append(block_text.replace("\n", " "))
-
-    if not possible_captions:
-        return "Caption not found"
-
-    return possible_captions[0]
-
-
-def extract_images(pdf_path: Path, output_dir: Path) -> list[ExtractedImage]:
-    """Extract images from a PDF file"""
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    extracted_images = []
-    seen_xrefs = set()
-    with pymupdf.open(pdf_path) as doc:
-        for page_num, page in enumerate(doc, start=1):
-            page_images = page.get_images(full=True)
-            for image_num, image in enumerate(page_images, start=1):
-                xref = image[0]
-                if xref in seen_xrefs:
-                    continue
-
-                seen_xrefs.add(xref)
-
-                image_info = doc.extract_image(xref)
-                width, height = image_info["width"], image_info["height"]
-
-                if width < 120 or height < 120:
-                    continue
-
-                caption = find_caption(page, xref)
-
-                extension = image_info["ext"]
-                image_path = output_dir / f"page_{page_num}_image_{image_num}.{extension}"
-
-                image_path.write_bytes(image_info["image"])
-
-                extracted_images.append(
-                    ExtractedImage(
-                        page_num=page_num,
-                        path=image_path,
-                        width=width,
-                        height=height,
-                        caption=caption,
-                    )
-                )
-
-    return extracted_images
-
-
-def find_article_title(text: str, pdf_path: Path) -> str:
-    """Find article title from the first non-empty text line"""
-    for line in text.splitlines():
-        candidate = line.strip()
-        if candidate:
-            continue
-
-        if candidate.startswith("--- Page"):
-            continue
-
-        if len(candidate) > 10:
-            return candidate[:150]
-
-    return pdf_path.stem.replace("_", " ")
-
-
-def build_article(pdf_path: Path, images_dir: Path) -> Article:
-    """Build one structured object containing the extracted paper data"""
-    page_count, text = read_pdf_text(pdf_path)
-    images = extract_images(pdf_path, images_dir)
-    title = find_article_title(text, pdf_path)
-
-    return Article(
-        source_path=pdf_path,
-        title=title,
-        page_count=page_count,
-        text=text,
-        images=images,
-    )
-
-
-def article_to_dict(article: Article) -> dict:
-    """Convert an Article object into JSON-friendly data"""
-    return {
-        "source_path": str(article.source_path),
-        "title": article.title,
-        "page_count": article.page_count,
-        "text": article.text,
-        "images": [
-            {
-                "page_number": image.page_num,
-                "path": str(image.path),
-                "width": image.width,
-                "height": image.height,
-                "caption": image.caption,
-            }
-            for image in article.images
-        ],
-    }
-
-
-def save_article_json(article: Article, output_path: Path) -> None:
-    """Save the extracted article data to a JSON file"""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    article_data = article_to_dict(article)
-
-    output_path.write_text(
-        json.dumps(
-            article_data,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf8",
-    )
-
-
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract text from PDF"
+        prog="paper2slides",
+        description="Turn a research paper PDF into an editable PowerPoint presentation.",
     )
+    parser.add_argument("pdf_path", type=Path, help="Path to the paper (PDF)")
     parser.add_argument(
-        "pdf_path",
-        type=Path,
-        help="Path to PDF file",
-    )
-    parser.add_argument(
-        "--images-dir",
-        type=Path,
-        default=Path("data/extracted_images"),
-        help="Directory to save extracted images",
-    )
-    parser.add_argument(
-        "--article-json",
-        type=Path,
-        default=Path("data/article.json"),
-        help="Path to article JSON file",
-    )
-    parser.add_argument(
-        "--summarize",
-        action="store_true",
-        help="Generate an AI summary of the article",
+        "--slides",
+        type=int,
+        choices=range(MIN_SLIDES, MAX_SLIDES + 1),
+        default=5,
+        metavar=f"[{MIN_SLIDES}-{MAX_SLIDES}]",
+        help="Number of slides to generate (default: 5)",
     )
     parser.add_argument(
         "--language",
         default="en",
-        help="Language for the AI summary",
+        help="Language code for the slide text, e.g. en or fa (default: en)",
     )
     parser.add_argument(
-        "--plan",
-        action="store_true",
-        help="Generate an AI presentation plan",
+        "--output",
+        type=Path,
+        default=None,
+        help="Where to write the .pptx (default: outputs/<paper>.pptx)",
     )
     parser.add_argument(
-        "--slides",
-        type=int,
-        choices=range(4, 10),
-        default=5,
-        help="Number of slides in presentation plan",
+        "--work-dir",
+        type=Path,
+        default=Path("data"),
+        help="Directory for extracted figures and intermediate JSON (default: data)",
     )
-    parser.add_argument(
-        "--review",
-        action="store_true",
-        help="Review image and text relationships in the presentation plan",
-    )
+    parser.add_argument("--model", default=None, help="Ollama model name (default: $OLLAMA_MODEL or qwen3:4b)")
+    parser.add_argument("--num-ctx", type=int, default=None, help="Context window in tokens (default: $OLLAMA_NUM_CTX or 16384)")
+    parser.add_argument("--no-render", action="store_true", help="Stop after the grounded plan; do not build the .pptx")
+    parser.add_argument("--verbose", action="store_true", help="Show model retry warnings")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.ERROR,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     if not args.pdf_path.exists():
         parser.error(f"PDF file '{args.pdf_path}' does not exist")
-
     if args.pdf_path.suffix.lower() != ".pdf":
-        parser.error(f"file '{args.pdf_path}' is not a PDF file")
+        parser.error(f"'{args.pdf_path}' is not a PDF file")
 
-    article = build_article(args.pdf_path, args.images_dir)
-    save_article_json(article, args.article_json)
+    llm = LLM(model=args.model, num_ctx=args.num_ctx)
 
-    summary = None
-    presentation_plan = None
-    candidate_images = []
-
-    if args.summarize or args.plan or args.review:
-        summary = summarize_article(
-            title=article.title,
-            text=article.text,
-            language=args.language,
-        )
-        summary_path = Path("data/article_summary.json")
-        summary_path.write_text(
-            json.dumps(
-                summary,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf8",
-        )
-
-    if args.plan or args.review:
-        candidate_images = [
-            {
-                "page_num": image.page_num,
-                "path": str(image.path),
-                "caption": image.caption,
-            }
-            for image in article.images
-        ]
-        presentation_plan = plan_presentation(
-            summary=summary,
-            images=candidate_images,
+    try:
+        result = run_pipeline(
+            args.pdf_path,
             slide_count=args.slides,
             language=args.language,
+            output_path=args.output,
+            work_dir=args.work_dir,
+            llm=llm,
+            render=not args.no_render,
+            progress=lambda message: print(message, flush=True),
         )
+    except (LLMError, RenderError, ValueError, FileNotFoundError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
 
-        plan_path = Path("data/presentation_plan.json")
-        plan_path.write_text(
-            json.dumps(
-                presentation_plan,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf8",
-        )
-
-    if args.review:
-        reviewed_presentation_plan = review_presentation_plan(
-            presentation_plan=presentation_plan,
-            images=candidate_images,
-            language=args.language,
-        )
-
-        reviewed_plan_path = Path(
-            "data/reviewed_presentation_plan.json"
-        )
-        reviewed_plan_path.write_text(
-            json.dumps(
-                reviewed_presentation_plan,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+    if result.pptx:
+        print(f"\nPresentation: {result.pptx}")
+    print(f"Plan: {result.final_plan_json}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
